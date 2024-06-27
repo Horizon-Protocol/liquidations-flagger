@@ -1,7 +1,7 @@
 require('dotenv').config()
 
-// const graph_endpoint = 'https://api.thegraph.com/subgraphs/name/horizon-protocol/mainnet-issuance';
-const graph_endpoint = 'https://api.thegraph.com/subgraphs/name/rout-horizon/bsc7-issuance';
+const graph_endpoint = 'https://api.studio.thegraph.com/query/76663/mainnet-issuance/version/latest';
+// const graph_endpoint = 'https://api.thegraph.com/subgraphs/name/rout-horizon/bsc7-issuance';
 
 const testnode = process.env.PROVIDER_URL;
 const account = process.env.ACCOUNT;
