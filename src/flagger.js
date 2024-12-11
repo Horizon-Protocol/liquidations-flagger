@@ -1,196 +1,208 @@
 const { ethers } = require('ethers');
-const { parseEther, formatEther } = require('ethers/lib/utils');
-const { Contract, Provider } = require('ethers-multicall2');
-const pageResults = require('graph-results-pager');
-const fs = require('fs');
+const { formatEther, parseEther } = require('ethers/lib/utils');
 
-const { graph_endpoint,
-    testnode,
-    synthetixAddress,
-    synthetixJson,
-    liquidatorAddress,
-    liquidatorJson,
+const {
+    rpcprovider,
+    graph_endpoint,
     account,
-    gasOptions, 
-    issuerAddress,
-    debtThreshold} = require('../config');
+    createContracts,
+    restart_timeout,
+    minimum_debt,
+} = require('./utils');
 
-
-const multiCallReadCratios = async (wallets) => {
-    // ethers initializations
-
-    const ethersprovider = new ethers.providers.JsonRpcProvider(testnode);
-    const ethcallProvider = new Provider(ethersprovider);
-    const synthetixContract = new Contract(synthetixAddress, synthetixJson);
-    const liquidationContract = new Contract(liquidatorAddress, liquidatorJson);
-    const issuerContract = new Contract(issuerAddress, liquidatorJson);
-
-    // console.log(liquidationContract);
-    let contractCallsCRatio = [];
-
-    await ethcallProvider.init();
-
-    // console.log("fetchPotentialHolders", wallets);
-
-    for (let index = 0; index < wallets.length; index++) {
-        contractCallsCRatio.push(synthetixContract.collateralisationRatio(wallets[index].address.toString()));
-    }
-    const resultsCRatio = await ethcallProvider.all(contractCallsCRatio);
-    // Join results with original call context
-    if (wallets.length == resultsCRatio.length) {
-        for (let index = 0; index < resultsCRatio.length; index++) {
-            wallets[index].cratio = resultsCRatio[index];
-            wallets[index].formattedCratio = formatCratio(resultsCRatio[index]);
-        }
-    } else {
-        throw ('Results from multicall are not same as holders');
-    }
-
-
-    let contractCallsDebt= [];
-    for (let index = 0; index < wallets.length; index++) {
-        contractCallsDebt.push(synthetixContract.debtBalanceOf(wallets[index].address.toString(), '0x7a55534400000000000000000000000000000000000000000000000000000000'));
-    }
-    const resultsDebtBalance = await ethcallProvider.all(contractCallsDebt);
-    // Join results with original call context
-    if (wallets.length == resultsDebtBalance.length) {
-        for (let index = 0; index < resultsDebtBalance.length; index++) {
-            wallets[index].debtBalanceOf = resultsDebtBalance[index];
-            wallets[index].formattedDebtBalanceOf = formatEther(resultsDebtBalance[index]);
-        }
-    } else {
-        throw ('Results from multicall are not same as holders');
-    }
-
-    // let contractCallsLiqAmounts= [];
-    // for (let index = 0; index < wallets.length; index++) {
-    //     contractCallsLiqAmounts.push(issuerContract.liquidationAmounts(wallets[index].address.toString(), false));
-    // }
-    // const resultsLiqAmounts1 = await ethcallProvider.all(contractCallsLiqAmounts.slice(0, 1));
-    // const resultsLiqAmounts2 = await ethcallProvider.all(contractCallsLiqAmounts.slice(Math.ceil(contractCallsLiqAmounts.length / 2)));
-    // console.log(resultsLiqAmounts1);
-    // // Join results with original call context
-    // if (wallets.length == resultsLiqAmounts.length) {
-    //     for (let index = 0; index < resultsLiqAmounts.length; index++) {
-    //         wallets[index].totalRedeemed = formatEther(resultsLiqAmounts[index].totalRedeemed);
-    //         wallets[index].debtToRemove = formatEther(resultsLiqAmounts[index].debtToRemove);
-    //         wallets[index].escrowToLiquidate = formatEther(resultsLiqAmounts[index].escrowToLiquidate);
-    //         wallets[index].initialDebtBalance = formatEther(resultsLiqAmounts[index].initialDebtBalance);
-    //     }
-    // } else {
-    //     throw ('Results from multicall are not same as holders');
-    // }
-
-    console.log(`Found a total of ${wallets.length} active stakers.`);
-    // })
-
-    const lratio = await getLiquidationRatio();
-    const filteredLiquidatable = wallets.filter((item) => item.cratio.gt(lratio) && item.debtBalanceOf.gt(ethers.utils.parseEther(debtThreshold)));
-
-    return filteredLiquidatable;
-
-}
-
-
+// Fetch holders using `graphql-request`
 async function fetchPotentialHolders() {
-    // Uses graph protocol to run through SNX contract. Since there is a limit of 100 results per query
-    // we can use graph-results-pager library to increase the limit.
-    return pageResults({
-        api: graph_endpoint, // Need to update when moving to a subgraph hosted service
-        // api: graph_endpoint, // Need to update when moving to a subgraph hosted service
-        // max: 10000,         // Currently there are around 8k holders.This can be updated
-        timeout: 10e3,
-        query: {
-            entity: 'activeStakers',
-            selection: {
-                orderBy: 'debtBalanceOf',
-                orderDirection: 'desc',
+    const { request, gql } = await import('graphql-request'); // Dynamic import of ES module
+
+    let allHolders = [];
+    let skip = 0;
+    const pageSize = 100;
+
+
+
+    while (true) {
+        const query1 = gql`
+            query($skip: Int!) {
+                activeStakers(where: { debtBalanceOf_gt: "0" }, skip: $skip) {
+                # activeStakers(where: { debtBalanceOf_gt: "0" }, skip: $skip, first: ${pageSize}) {
+                    id
+                    collateral
+                    debtBalanceOf
+                }
+            }
+        `;
+        const query2 = gql`
+            query($skip: Int!) {
+                snxholders(
+                first: ${pageSize},
+                skip: $skip,
+                orderBy: collateral,
+                orderDirection: desc,
                 where: {
-                    debtBalanceOf_gte: Number(0)
-                },
-            },
-            properties: [
-                'id', // the address of the holder
-                'collateral', // Synthetix.collateral (all collateral the account has, including escrowed )
-                'debtBalanceOf',
-            ],
-        },
-    })
-        .then(results => results.map(({ id, debtBalanceOf }) => ({
-            address: id,
-            cratio: 0,
-            formattedCratio: 0,
-            debtBalanceOf: debtBalanceOf
-        })
-        ))
-        .catch(err => console.error(err));
+                    debtshares_gt: 0,
+                }
+                ) {
+                id
+                balanceOf
+                block
+                claims
+                collateral
+                debtEntryAtIndex
+                debtshares
+                initialDebtOwnership
+                mints
+                timestamp
+                transferable
+                }
+          }
+        `;
+
+        const variables = { skip };
+        try {
+            const data = await request(graph_endpoint, query1, variables);
+            const results = data.activeStakers.map(({ id, debtBalanceOf }) => ({
+                // const results = data.snxholders.map(({ id }) => ({
+                address: id,
+                subgraph_debtBalanceOf: debtBalanceOf,
+                formatted_contract_debtBalanceOf: 0,
+                contract_debtBalanceOf: 0,
+                cratio: 0,
+                formattedCratio: 0,
+                liquidationDeadline: 555 // any random non-zero
+            }));
+
+            allHolders = allHolders.concat(results);
+            if (results.length < pageSize) break; // No more results
+            skip += pageSize;
+        } catch (err) {
+            console.error('FLAGGER: Error fetching holders:', err);
+            break;
+        }
+    }
+
+    console.log("FLAGGER: ALl HOLDERS COUNT", allHolders.length)
+    return allHolders;
 }
 
+const multiCallReadData = async (wallets) => {
+    const { liquidatorContract, synthetixContract, multicallContract } = createContracts();
 
-const flagForLiquidation = async (walletsReadyforFlagging) => {    
-    const provider = new ethers.providers.JsonRpcProvider(testnode);
+    const collateralRatioCalls = wallets.map((wallet) => ({
+        target: synthetixContract.address,
+        callData: synthetixContract.interface.encodeFunctionData('collateralisationRatio', [wallet.address]),
+        allowFailure: true,
+    }));
+
+    const debtBalanceOfCalls = wallets.map((wallet) => ({
+        target: synthetixContract.address,
+        callData: synthetixContract.interface.encodeFunctionData('debtBalanceOf', [wallet.address, '0x7a55534400000000000000000000000000000000000000000000000000000000']),
+        allowFailure: true,
+    }));
+
+    const liquidationDeadlineCalls = wallets.map((wallet) => ({
+        target: liquidatorContract.address,
+        // callData: liquidatorContract.interface.encodeFunctionData('getLiquidationDeadlineForAccount', ['0x8f5992efdcb6e2656418458d8f981c778436ea26']),
+        callData: liquidatorContract.interface.encodeFunctionData('getLiquidationDeadlineForAccount', [wallet.address]),
+        allowFailure: true,
+    }));
+
+    const collateralRatio_callResult = await multicallContract.callStatic.aggregate3(collateralRatioCalls);
+    const debtBalanceOf_callResult = await multicallContract.callStatic.aggregate3(debtBalanceOfCalls);
+    const liquidationDeadline_callResult = await multicallContract.callStatic.aggregate3(liquidationDeadlineCalls);
+
+    // console.log('FLAGGER: callResult', callResult);
+
+    if (collateralRatio_callResult.length === debtBalanceOf_callResult.length) {
+        for (let i = 0; i < collateralRatio_callResult.length; i++) {
+            const cratio = ethers.BigNumber.from(collateralRatio_callResult[i].returnData);
+            const debtBalanceOf = ethers.BigNumber.from(debtBalanceOf_callResult[i].returnData);
+            const deadline = ethers.BigNumber.from(liquidationDeadline_callResult[i].returnData);
+            // console.log('FLAGGER: deadline', deadline.toString());
+
+            wallets[i].contract_debtBalanceOf = debtBalanceOf;
+            wallets[i].formatted_contract_debtBalanceOf = formatEther(debtBalanceOf);
+            wallets[i].cratio = cratio;
+            wallets[i].formattedCratio = formatCratio(cratio);
+            wallets[i].liquidationDeadline = deadline.toString();
+        }
+    }
+
+    // console.log('FLAGGER: wallets', wallets);
+    // console.log('FLAGGER: wallets', wallets.length);
+
+    return wallets;
+};
+
+const filterFlaggableWithDebt = async (wallets, minDebt = '100') => {
+    const { liquidatorContract } = createContracts();
+
+    const lratio = await liquidatorContract.liquidationRatio();
+
+    return wallets.filter((item) => {
+        // console.log('FLAGGER:item', item.liquidationDeadline, item.liquidationDeadline == 0)
+        return item.cratio.gt(lratio) && item.contract_debtBalanceOf.gt(parseEther(minDebt)) && item.liquidationDeadline == 0;
+    });
+    // return wallets.filter((item) => item.cratio.gt(lratio) && item.contract_debtBalanceOf.gt(parseEther(minDebt)));
+}
+
+// Flag accounts for liquidation
+const flagForLiquidation = async (walletsReadyForFlagging) => {
     const wallet = new ethers.Wallet(account);
-    const providerWallet = wallet.connect(provider);
-    const synthetixContract = new ethers.Contract(synthetixAddress, synthetixJson, provider);
-    const liquidatorContract = new ethers.Contract(liquidatorAddress, liquidatorJson, provider);
+    const providerWallet = wallet.connect(rpcprovider);
+    const { liquidatorContract, synthetixContract, multicallContract } = createContracts();
 
-    // for (let index = 0; index < 1; index++) {
-    for (let index = 0; index < walletsReadyforFlagging.length; index++) {
-        const wallet = walletsReadyforFlagging[index];
+    for (const wallet of walletsReadyForFlagging) {
         const cratio = await synthetixContract.collateralisationRatio(wallet.address);
         const liquidationRatio = await liquidatorContract.liquidationRatio();
         const deadline = await liquidatorContract.getLiquidationDeadlineForAccount(wallet.address);
 
-        const flag = cratio.gt(liquidationRatio);
-        // console.log("Logic reaching here........... ", deadline.isZero());
-        if (flag && deadline.isZero()) {
-            console.log("Accounts ready for flagging(liquidation)", wallet.address);
-
+        if (cratio.gt(liquidationRatio) && deadline.isZero()) {
+            console.log('FLAGGER: Flagging account for liquidation:', wallet.address);
             const signerContract = liquidatorContract.connect(providerWallet);
-            let txHash = await signerContract.flagAccountForLiquidation(wallet.address, gasOptions);
-            await txHash.wait(1);
-            console.log('txHash', txHash);
+            const tx = await signerContract.flagAccountForLiquidation(wallet.address);
+            await tx.wait(1);
+            console.log('FLAGGER: Transaction hash:', tx.hash);
         }
-        continue;
     }
+};
 
-}
+// Format collateralisation ratio
+const formatCratio = (amount) => amount != 0 ? 100 / formatEther(amount) : 0;
 
-const getLiquidationRatio = async () => { 
-    const provider = new ethers.providers.JsonRpcProvider(testnode);
-    const liquidatorContract = new ethers.Contract(liquidatorAddress, liquidatorJson, provider);
-
-    const liquidationRatio = await liquidatorContract.liquidationRatio();
-    return liquidationRatio;
- }
-
-
+// Main function
 async function flagger() {
-    const holders = await fetchPotentialHolders();
-    console.log("holders", holders.length);
-    // fs.writeFileSync('holders.json', JSON.stringify(holders))
+    while (true) {
+        try {
+            const holders = await fetchPotentialHolders();
+            // console.log("FLAGGER: holders", holders);
 
-    
-    const flaggableForLiquidation = await multiCallReadCratios(holders);
-    // console.log("flaggableForLiquidation", flaggableForLiquidation);
+            const holdersData = await multiCallReadData(holders);
 
-    console.log("flaggableForLiquidation", flaggableForLiquidation.length);
-    fs.writeFileSync('flags.json', JSON.stringify(flaggableForLiquidation))
+            if (holdersData.length != 0) {
+                const flaggableForLiquidation = await filterFlaggableWithDebt(holdersData, minimum_debt);
 
-    if (!(flaggableForLiquidation.length > 0)) {
-        console.log("No accounts found for Liquidations");
-    } else {
-        await flagForLiquidation(flaggableForLiquidation);
+                console.log("FLAGGER: flaggableForLiquidation", flaggableForLiquidation);
+                console.log("FLAGGER: flaggableForLiquidation", flaggableForLiquidation.length);
+
+                if (flaggableForLiquidation.length === 0) {
+                    console.log('FLAGGER: No accounts found for liquidation.');
+                } else {
+                    await flagForLiquidation(flaggableForLiquidation);
+                }
+            }
+
+            await new Promise(res => setTimeout(res, restart_timeout));
+
+        } catch (error) {
+            console.error(`FLAGGER: error ${error}`);
+            // await sendTG(`MAIN_KEEPER - ${(error as Error).toString()}}`)
+            await new Promise(res => setTimeout(res, restart_timeout));
+            continue;
+        }
     }
+
 }
 
-const formatCratio= (amount) => {
-    const ratio = 100/formatEther(amount);
-    return ratio
-}
+module.exports = { flagger };
 
-module.exports = {
-    flagger
-}
-
-// flagger();
+// flagger()
