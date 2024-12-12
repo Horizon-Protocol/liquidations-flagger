@@ -2,9 +2,8 @@ const { ethers } = require('ethers');
 const { formatEther, parseEther } = require('ethers/lib/utils');
 
 const {
-    rpcprovider,
     graph_endpoint,
-    account,
+    signer,
     createContracts,
     restart_timeout,
     minimum_debt,
@@ -147,8 +146,6 @@ const filterFlaggableWithDebt = async (wallets, minDebt = '100') => {
 
 // Flag accounts for liquidation
 const flagForLiquidation = async (walletsReadyForFlagging) => {
-    const wallet = new ethers.Wallet(account);
-    const providerWallet = wallet.connect(rpcprovider);
     const { liquidatorContract, synthetixContract, multicallContract } = createContracts();
 
     for (const wallet of walletsReadyForFlagging) {
@@ -158,7 +155,7 @@ const flagForLiquidation = async (walletsReadyForFlagging) => {
 
         if (cratio.gt(liquidationRatio) && deadline.isZero()) {
             console.log('FLAGGER: Flagging account for liquidation:', wallet.address);
-            const signerContract = liquidatorContract.connect(providerWallet);
+            const signerContract = liquidatorContract.connect(signer);
             const tx = await signerContract.flagAccountForLiquidation(wallet.address);
             await tx.wait(1);
             console.log('FLAGGER: Transaction hash:', tx.hash);

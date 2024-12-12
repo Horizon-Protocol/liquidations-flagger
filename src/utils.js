@@ -1,5 +1,5 @@
 require('dotenv').config()
-const { ethers } = require('ethers');
+const { ethers, Wallet } = require('ethers');
 const WebSocketProvider = require('./customWebsocket');
 
 const testnode = process.env.PROVIDER_URL;
@@ -29,6 +29,9 @@ const ABI = [
 
 const rpcprovider = new ethers.providers.JsonRpcProvider(testnode);
 const wsprovider = new WebSocketProvider(testnode.replace(/https/, 'wss'));
+const wallet = new Wallet(account);
+const signer = wallet.connect(rpcprovider);
+
 const liquidatorEventsContract = new ethers.Contract(liquidatorAddress, ABI, wsprovider);
 
 const createContracts = () => {
@@ -44,6 +47,7 @@ module.exports = {
     graph_endpoint,
     network,
     account,
+    signer,
     createContracts,
     liquidatorEventsContract,
     restart_timeout,

@@ -2,6 +2,7 @@ const { Contract, providers, ethers } = require("ethers");
 const { showFlaggedPositions } = require('./state');
 const {
     rpcprovider,
+    signer,
     createContracts,
     restart_timeout,
 } = require('./utils');
@@ -72,19 +73,18 @@ async function executeLiquidations() {
                 console.log(`LIQUIDATOR: Ready to execute: ${successfulPositions.length}`);
                 if (successfulPositions.length > 0) {
                     for (const position of successfulPositions) {
-                        const marketContract = new Contract(position.proxyContract, contractABI, signer)
                         // Estimate gas and gasprice
-                        const gasLimit = await marketContract.estimateGas.liquidateDelinquentAccount(position.account);
+                        const gasLimit = await synthetixContract.connect(signer).estimateGas.liquidateDelinquentAccount(position.account);
                         const gasPrice = await rpcprovider.getGasPrice();
 
                         // Execute the transaction
-                        const flagTx = await marketContract.liquidateDelinquentAccount(position.account, {
+                        const flagTx = await synthetixContract.connect(signer).liquidateDelinquentAccount(position.account, {
                             gasLimit: gasLimit.mul(6).div(5),
                             gasPrice: gasPrice.mul(6).div(5),
                         });
 
                         await flagTx.wait(1);
-                        console.log("LIQUIDATOR: Flagging tx.....", flagTx.hash);
+                        console.log("LIQUIDATOR: Liquidating tx.....", flagTx.hash);
 
                     }
 
